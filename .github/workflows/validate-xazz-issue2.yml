@@ -50,8 +50,27 @@ jobs:
         working-directory: _upstream
         run: cargo fmt --all -- --check
       - name: Test security API
+        id: cargo_test
         working-directory: _upstream
-        run: cargo test -p xazz-server --bin security_api
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          cargo test -p xazz-server --bin security_api 2>&1 | tee /tmp/xazz-cargo-test.log
+          status=${PIPESTATUS[0]}
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Upload cargo test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xazz-issue2-cargo-test-log
+          path: /tmp/xazz-cargo-test.log
+          if-no-files-found: error
+          retention-days: 1
+      - name: Stop after failed tests
+        if: steps.cargo_test.outputs.status != '0'
+        run: exit 1
       - name: Clippy
         working-directory: _upstream
         run: cargo clippy -p xazz-server --bin security_api -- -D warnings

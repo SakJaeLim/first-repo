@@ -37,6 +37,10 @@ jobs:
           path = Path('xazz-server/src/security.rs')
           text = path.read_text(encoding='utf-8')
           text = text.replace(
+              'let report = analyze_code(unsafe_code, &SecurityPolicy::default());',
+              'let report = analyze_code(unsafe_code, &SecurityPolicy::default());\n        println!("unsafe report: {report:#?}");',
+          )
+          text = text.replace(
               'assert!(report.violations.is_empty());',
               'assert!(report.violations.is_empty(), "safe report: {report:#?}");',
           )
@@ -50,6 +54,41 @@ jobs:
           )
           path.write_text(text, encoding='utf-8')
           PY
+      - name: Print parsed AST for demo plans
+        working-directory: _upstream
+        shell: bash
+        run: |
+          cat > xazz-server/src/bin/debug_security_ast.rs <<'RS'
+          use std::fs;
+          use xazz_compiler::check_source;
+
+          fn main() {
+              for path in [
+                  "examples/security/patient_unsafe.xzz",
+                  "examples/security/patient_safe.xzz",
+              ] {
+                  let source = fs::read_to_string(path).expect("read demo source");
+                  let (parsed, semantic) = check_source(&source);
+                  println!("===== {path} =====");
+                  println!("PARSED:\n{parsed:#?}");
+                  println!("SEMANTIC:\n{semantic:#?}");
+              }
+          }
+          RS
+          set +e
+          set -o pipefail
+          cargo run -p xazz-server --bin debug_security_ast 2>&1 | tee /tmp/xazz-ast.log
+          status=${PIPESTATUS[0]}
+          rm -f xazz-server/src/bin/debug_security_ast.rs
+          exit "$status"
+      - name: Upload AST diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xazz-issue2-ast-log
+          path: /tmp/xazz-ast.log
+          if-no-files-found: error
+          retention-days: 1
       - name: Validate training data
         working-directory: _upstream
         run: |

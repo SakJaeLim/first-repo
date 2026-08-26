@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - ci/xazz-issue2-guardrail-validation
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -21,24 +18,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Extract isolated fixture
+      - name: Reconstruct patch
         run: |
-          mkdir -p _fixture
-          tar -xzf xazz_issue2_fixture.tar.gz -C _fixture
-      - name: Format
-        working-directory: _fixture
-        run: cargo fmt --all
-      - name: Test
-        working-directory: _fixture
-        run: cargo test --all-targets
+          cat ci/xazz_issue2_patch.b64.part* | base64 -d | gzip -d > /tmp/xazz_issue2.patch
+      - name: Clone upstream
+        run: git clone --depth 1 https://github.com/x1zzdev/Xazz.git _upstream
+      - name: Apply patch
+        working-directory: _upstream
+        run: |
+          git apply --check /tmp/xazz_issue2.patch
+          git apply /tmp/xazz_issue2.patch
+      - name: Validate training data
+        working-directory: _upstream
+        run: |
+          python3 experiments/slm_guardrail/validate_dataset.py
+          python3 -m py_compile experiments/slm_guardrail/train_qlora.py experiments/slm_guardrail/validate_dataset.py
+      - name: Format check
+        working-directory: _upstream
+        run: cargo fmt --all -- --check
+      - name: Test security API
+        working-directory: _upstream
+        run: cargo test -p xazz-server --bin security_api
       - name: Clippy
-        working-directory: _fixture
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Upload formatted validated source
-        uses: actions/upload-artifact@v4
-        with:
-          name: xazz-issue2-formatted-source
-          path: |
-            _fixture/Cargo.toml
-            _fixture/src
-          if-no-files-found: error
+        working-directory: _upstream
+        run: cargo clippy -p xazz-server --bin security_api -- -D warnings

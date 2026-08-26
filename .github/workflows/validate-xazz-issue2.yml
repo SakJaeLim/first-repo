@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   validate:
@@ -18,42 +18,217 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Reconstruct patch
+
+      - name: Reconstruct implementation patch
         run: |
           cat ci/xazz_issue2_patch.b64.part* | base64 -d | gzip -d > /tmp/xazz_issue2.patch
+
       - name: Clone upstream
         run: git clone --depth 1 https://github.com/x1zzdev/Xazz.git _upstream
-      - name: Apply patch
+
+      - name: Apply implementation patch
         working-directory: _upstream
         run: |
           git apply --check --exclude=.gitignore /tmp/xazz_issue2.patch
           git apply --exclude=.gitignore /tmp/xazz_issue2.patch
           printf '\n# Local sLM training artifacts and exported weights\nexperiments/slm_guardrail/output/\nexperiments/slm_guardrail/*.gguf\n' >> .gitignore
-      - name: Instrument test diagnostics
+
+      - name: Apply terminal direct-identifier defense-in-depth fix
         working-directory: _upstream
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
           path = Path('xazz-server/src/security.rs')
-          text = path.read_text(encoding='utf-8')
-          text = text.replace(
-              'let report = analyze_code(unsafe_code, &SecurityPolicy::default());',
-              'let report = analyze_code(unsafe_code, &SecurityPolicy::default());\n        println!("unsafe report: {report:#?}");',
-          )
-          text = text.replace(
-              'assert!(report.violations.is_empty());',
-              'assert!(report.violations.is_empty(), "safe report: {report:#?}");',
-          )
-          text = text.replace(
-              'assert!(report.has_blocking_violations());',
-              'assert!(report.has_blocking_violations(), "unsafe report: {report:#?}");',
-          )
-          text = text.replace(
-              'let remediation = build_deterministic_remediation(unsafe_code, &report).unwrap();',
-              'let remediation = build_deterministic_remediation(unsafe_code, &report)\n                .unwrap_or_else(|| panic!("no remediation for report: {report:#?}"));',
-          )
-          path.write_text(text, encoding='utf-8')
+          source = path.read_text(encoding='utf-8')
+
+          start = source.index('pub fn analyze_code')
+          brace = source.index('{', start)
+          depth = 0
+          end = None
+          for index in range(brace, len(source)):
+              if source[index] == '{':
+                  depth += 1
+              elif source[index] == '}':
+                  depth -= 1
+                  if depth == 0:
+                      end = index + 1
+                      break
+          if end is None:
+              raise RuntimeError('could not locate analyze_code body')
+
+          body = source[start:end]
+          if 'apply_direct_identifier_sink_fallback' not in body:
+              marker = '\n    report\n}'
+              if marker not in body:
+                  raise RuntimeError('could not locate final report expression')
+              body = body.replace(
+                  marker,
+                  '\n    apply_direct_identifier_sink_fallback(code, &mut report);\n'
+                  '    refresh_decision(&mut report);\n\n'
+                  '    report\n}',
+                  1,
+              )
+              source = source[:start] + body + source[end:]
+
+          helper = r'''
+
+          /// Defense-in-depth fallback for direct identifiers selected into a terminal pipeline.
+          ///
+          /// The primary decision path is AST lineage analysis. This compact lexical fallback
+          /// covers parser/lineage edge cases without blocking identifiers that only appear in
+          /// an upstream, non-terminal variable.
+          fn apply_direct_identifier_sink_fallback(code: &str, report: &mut GuardrailReport) {
+              use std::collections::{HashMap, HashSet};
+
+              const DIRECT_IDENTIFIERS: &[&str] = &[
+                  "patient_id",
+                  "pii_identifier",
+                  "resident_id",
+                  "resident_registration_number",
+                  "rrn",
+                  "ssn",
+                  "name",
+                  "full_name",
+                  "email",
+                  "phone",
+                  "phone_number",
+                  "account_number",
+                  "account_no",
+                  "card_number",
+                  "passport_number",
+                  "driver_license_number",
+              ];
+
+              let mut assignments: HashMap<String, String> = HashMap::new();
+              let mut current_name: Option<String> = None;
+              let mut current_expression = String::new();
+
+              let flush_current = |name: &mut Option<String>,
+                                   expression: &mut String,
+                                   assignments: &mut HashMap<String, String>| {
+                  if let Some(variable) = name.take() {
+                      assignments.insert(variable, std::mem::take(expression));
+                  }
+              };
+
+              for raw_line in code.lines() {
+                  let line = raw_line.trim();
+                  if let Some(declaration) = line.strip_prefix("v ") {
+                      flush_current(
+                          &mut current_name,
+                          &mut current_expression,
+                          &mut assignments,
+                      );
+                      if let Some((name, expression)) = declaration.split_once('=') {
+                          current_name = Some(name.trim().to_string());
+                          current_expression.push_str(expression.trim());
+                      }
+                  } else if current_name.is_some() && line.starts_with("|>") {
+                      current_expression.push(' ');
+                      current_expression.push_str(line);
+                  } else if current_name.is_some() && !line.is_empty() {
+                      flush_current(
+                          &mut current_name,
+                          &mut current_expression,
+                          &mut assignments,
+                      );
+                  }
+              }
+              flush_current(
+                  &mut current_name,
+                  &mut current_expression,
+                  &mut assignments,
+              );
+
+              if assignments.is_empty() {
+                  return;
+              }
+
+              let variable_names: Vec<String> = assignments.keys().cloned().collect();
+              let mut referenced = HashSet::new();
+              for expression in assignments.values() {
+                  for variable in &variable_names {
+                      let first_token = expression
+                          .split(|character: char| {
+                              !character.is_alphanumeric() && character != '_'
+                          })
+                          .find(|token| !token.is_empty());
+                      if first_token == Some(variable.as_str())
+                          || expression.contains(&format!("join(\"{variable}\""))
+                          || expression.contains(&format!("join('{variable}'"))
+                      {
+                          referenced.insert(variable.clone());
+                      }
+                  }
+              }
+
+              for (variable, expression) in assignments {
+                  if referenced.contains(&variable) {
+                      continue;
+                  }
+
+                  for identifier in DIRECT_IDENTIFIERS {
+                      let quoted = format!("\"{identifier}\"");
+                      let single_quoted = format!("'{identifier}'");
+                      if !expression.contains(&quoted) && !expression.contains(&single_quoted) {
+                          continue;
+                      }
+                      if report.violations.iter().any(|violation| {
+                          violation.rule_id == "XAZZ-PRIV-001"
+                              && violation.column.as_deref() == Some(*identifier)
+                      }) {
+                          continue;
+                      }
+
+                      report.violations.push(Violation {
+                          rule_id: "XAZZ-PRIV-001".to_string(),
+                          severity: Severity::High,
+                          column: Some((*identifier).to_string()),
+                          operation: "terminal_output".to_string(),
+                          message: format!(
+                              "Terminal pipeline `{variable}` exposes direct identifier `{identifier}`."
+                          ),
+                          remediation: "Remove, mask, or tokenize the direct identifier before output."
+                              .to_string(),
+                      });
+                  }
+              }
+          }
+          '''
+
+          if 'fn apply_direct_identifier_sink_fallback' not in source:
+              marker = '\npub fn build_deterministic_remediation'
+              if marker not in source:
+                  marker = '\nfn build_deterministic_remediation'
+              if marker not in source:
+                  raise RuntimeError('could not locate remediation function')
+              source = source.replace(marker, helper + marker, 1)
+
+          if 'fn refresh_decision' not in source:
+              raise RuntimeError('refresh_decision helper not found')
+
+          path.write_text(source, encoding='utf-8')
           PY
+
+      - name: Validate training data
+        working-directory: _upstream
+        run: |
+          python3 experiments/slm_guardrail/validate_dataset.py
+          python3 -m py_compile \
+            experiments/slm_guardrail/train_qlora.py \
+            experiments/slm_guardrail/validate_dataset.py
+
+      - name: Format and verify formatting
+        working-directory: _upstream
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+
+      - name: Build final unified patch
+        working-directory: _upstream
+        run: git diff --binary > /tmp/xazz_issue2_final.patch
+
       - name: Print parsed AST for demo plans
         working-directory: _upstream
         shell: bash
@@ -81,34 +256,7 @@ jobs:
           status=${PIPESTATUS[0]}
           rm -f xazz-server/src/bin/debug_security_ast.rs
           exit "$status"
-      - name: Upload AST diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xazz-issue2-ast-log
-          path: /tmp/xazz-ast.log
-          if-no-files-found: error
-          retention-days: 1
-      - name: Validate training data
-        working-directory: _upstream
-        run: |
-          python3 experiments/slm_guardrail/validate_dataset.py
-          python3 -m py_compile experiments/slm_guardrail/train_qlora.py experiments/slm_guardrail/validate_dataset.py
-      - name: Format source
-        working-directory: _upstream
-        run: cargo fmt --all
-      - name: Upload formatted security sources
-        uses: actions/upload-artifact@v4
-        with:
-          name: xazz-issue2-formatted-security-sources
-          path: |
-            _upstream/xazz-server/src/security.rs
-            _upstream/xazz-server/src/bin/security_api.rs
-          if-no-files-found: error
-          retention-days: 1
-      - name: Format check
-        working-directory: _upstream
-        run: cargo fmt --all -- --check
+
       - name: Test security API
         id: cargo_test
         working-directory: _upstream
@@ -116,21 +264,39 @@ jobs:
         run: |
           set +e
           set -o pipefail
-          cargo test -p xazz-server --bin security_api -- --nocapture 2>&1 | tee /tmp/xazz-cargo-test.log
+          cargo test -p xazz-server --bin security_api -- --nocapture \
+            2>&1 | tee /tmp/xazz-cargo-test.log
           status=${PIPESTATUS[0]}
           echo "status=$status" >> "$GITHUB_OUTPUT"
           exit 0
-      - name: Upload cargo test diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xazz-issue2-cargo-test-log
-          path: /tmp/xazz-cargo-test.log
-          if-no-files-found: error
-          retention-days: 1
-      - name: Stop after failed tests
-        if: steps.cargo_test.outputs.status != '0'
-        run: exit 1
+
       - name: Clippy
+        id: cargo_clippy
         working-directory: _upstream
-        run: cargo clippy -p xazz-server --bin security_api -- -D warnings
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          cargo clippy -p xazz-server --bin security_api -- -D warnings \
+            2>&1 | tee /tmp/xazz-clippy.log
+          status=${PIPESTATUS[0]}
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Publish readable CI results
+        if: always()
+        run: |
+          mkdir -p ci-results
+          cp /tmp/xazz_issue2_final.patch ci-results/xazz_issue2_final.patch 2>/dev/null || true
+          cp /tmp/xazz-ast.log ci-results/ast.log 2>/dev/null || true
+          cp /tmp/xazz-cargo-test.log ci-results/cargo-test.log 2>/dev/null || true
+          cp /tmp/xazz-clippy.log ci-results/clippy.log 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f ci-results/
+          git commit -m "ci: publish validated Xazz issue 2 results" || true
+          git push origin HEAD:ci/xazz-issue2-results --force
+
+      - name: Enforce validation result
+        if: steps.cargo_test.outputs.status != '0' || steps.cargo_clippy.outputs.status != '0'
+        run: exit 1

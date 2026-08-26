@@ -26,8 +26,9 @@ jobs:
       - name: Apply patch
         working-directory: _upstream
         run: |
-          git apply --check /tmp/xazz_issue2.patch
-          git apply /tmp/xazz_issue2.patch
+          git apply --check --exclude=.gitignore /tmp/xazz_issue2.patch
+          git apply --exclude=.gitignore /tmp/xazz_issue2.patch
+          printf '\n# Local sLM training artifacts and exported weights\nexperiments/slm_guardrail/output/\nexperiments/slm_guardrail/*.gguf\n' >> .gitignore
       - name: Validate training data
         working-directory: _upstream
         run: |

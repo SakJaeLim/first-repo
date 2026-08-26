@@ -34,6 +34,18 @@ jobs:
         run: |
           python3 experiments/slm_guardrail/validate_dataset.py
           python3 -m py_compile experiments/slm_guardrail/train_qlora.py experiments/slm_guardrail/validate_dataset.py
+      - name: Format source
+        working-directory: _upstream
+        run: cargo fmt --all
+      - name: Upload formatted security sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: xazz-issue2-formatted-security-sources
+          path: |
+            _upstream/xazz-server/src/security.rs
+            _upstream/xazz-server/src/bin/security_api.rs
+          if-no-files-found: error
+          retention-days: 1
       - name: Format check
         working-directory: _upstream
         run: cargo fmt --all -- --check

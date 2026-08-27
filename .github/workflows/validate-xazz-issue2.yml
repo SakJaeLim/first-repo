@@ -35,8 +35,11 @@ jobs:
       - name: Apply patch
         working-directory: _upstream
         run: |
-          git apply --check /tmp/xazz_issue2.patch
-          git apply /tmp/xazz_issue2.patch
+          # Upstream stores the final .gitattributes line without a trailing newline.
+          # Apply all functional changes, then add the tiny CSV exception explicitly.
+          git apply --check --exclude=.gitattributes /tmp/xazz_issue2.patch
+          git apply --exclude=.gitattributes /tmp/xazz_issue2.patch
+          printf '\n# Keep the tiny synthetic security demo reviewable without Git LFS.\nexamples/security/patients.csv -filter diff merge text\n' >> .gitattributes
           git check-attr filter diff merge text -- examples/security/patients.csv
 
       - name: Validate synthetic sLM corpus

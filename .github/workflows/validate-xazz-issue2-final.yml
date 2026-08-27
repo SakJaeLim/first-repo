@@ -1,0 +1,178 @@
+name: Final validate Xazz Issue 2 delivery
+
+on:
+  push:
+    branches:
+      - ci/xazz-issue2-guardrail-validation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      XAZZ_BASE_SHA: daba67fc78775b8623135716a49531f50e2b6dd0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Reconstruct implementation patch
+        run: |
+          cat ci/xazz_issue2_patch_v3.b64.part* | base64 -d | gzip -d > /tmp/xazz_issue2.patch
+          echo "4a972abf13111d6c91f1f5db854194436f370f28a252bbb26095e91e95469ef4  /tmp/xazz_issue2.patch" | sha256sum -c -
+
+      - name: Clone and pin latest reviewed upstream
+        run: |
+          git clone https://github.com/x1zzdev/Xazz.git _upstream
+          git -C _upstream checkout --detach "$XAZZ_BASE_SHA"
+
+      - name: Apply implementation patch
+        working-directory: _upstream
+        run: |
+          git apply --check --exclude=.gitattributes /tmp/xazz_issue2.patch
+          git apply --exclude=.gitattributes /tmp/xazz_issue2.patch
+          printf '\n# Keep the tiny synthetic security demo reviewable without Git LFS.\nexamples/security/patients.csv -filter diff merge text\n' >> .gitattributes
+
+      - name: Apply final review fixes
+        working-directory: _upstream
+        run: python3 ../ci/apply_xazz_issue2_final_fixes.py
+
+      - name: Validate synthetic sLM corpus
+        working-directory: _upstream
+        run: |
+          python3 experiments/slm_guardrail/validate_dataset.py
+          python3 -m py_compile \
+            experiments/slm_guardrail/train_qlora.py \
+            experiments/slm_guardrail/validate_dataset.py
+
+      - name: Format and static diff checks
+        working-directory: _upstream
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          git diff --check
+
+      - name: Focused unit tests
+        working-directory: _upstream
+        run: cargo test -p xazz-server --bin security_api
+
+      - name: Focused strict Clippy
+        working-directory: _upstream
+        run: cargo clippy -p xazz-server --bin security_api --no-deps -- -D warnings
+
+      - name: Workspace tests
+        working-directory: _upstream
+        run: cargo test --workspace
+
+      - name: Workspace Clippy baseline
+        working-directory: _upstream
+        run: cargo clippy --workspace --all-targets --no-deps
+
+      - name: Build security API
+        working-directory: _upstream
+        run: cargo build -p xazz-server --bin security_api
+
+      - name: API smoke test
+        working-directory: _upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p xazz-server --bin security_api > /tmp/xazz-security.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8006/health >/tmp/health.json; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8006/health >/tmp/health.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          policy=json.loads(Path('examples/security/healthcare_policy.json').read_text())
+          for name in ('unsafe','safe'):
+              code=Path(f'examples/security/patient_{name}.xzz').read_text()
+              Path(f'/tmp/{name}.json').write_text(json.dumps({'code':code,'policy':policy}))
+          remediation=json.loads(Path('/tmp/unsafe.json').read_text())
+          remediation['provider']='deterministic'
+          Path('/tmp/remediate.json').write_text(json.dumps(remediation))
+          PY
+
+          curl -fsS -H 'content-type: application/json' \
+            --data-binary @/tmp/unsafe.json \
+            http://127.0.0.1:8006/security/analyze >/tmp/unsafe-report.json
+          curl -fsS -H 'content-type: application/json' \
+            --data-binary @/tmp/safe.json \
+            http://127.0.0.1:8006/security/analyze >/tmp/safe-report.json
+          curl -fsS -H 'content-type: application/json' \
+            --data-binary @/tmp/remediate.json \
+            http://127.0.0.1:8006/security/remediate >/tmp/remediation.json
+
+          status=$(curl -sS -o /tmp/execute-rejected.json -w '%{http_code}' \
+            -H 'content-type: application/json' --data-binary @/tmp/unsafe.json \
+            http://127.0.0.1:8006/security/execute)
+          test "$status" = 422
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          unsafe=json.loads(Path('/tmp/unsafe-report.json').read_text())
+          safe=json.loads(Path('/tmp/safe-report.json').read_text())
+          remediation=json.loads(Path('/tmp/remediation.json').read_text())
+          rejected=json.loads(Path('/tmp/execute-rejected.json').read_text())
+          assert unsafe['decision']=='rejected' and unsafe['safe_to_execute'] is False
+          assert safe['decision']=='approved' and safe['safe_to_execute'] is True
+          assert safe['warnings']==[]
+          assert remediation['safe_code']
+          assert remediation['validation_report']['decision']=='approved'
+          assert remediation['validation_report']['warnings']==[]
+          assert rejected['executed'] is False
+          assert rejected['audit']['outcome']=='policy_rejected'
+          assert len(unsafe['policy_hash'])==64 and len(unsafe['code_hash'])==64
+          assert len(unsafe['policy_sources'])==2
+          print('Final API smoke assertions passed')
+          PY
+
+      - name: Generate final reviewable patch
+        working-directory: _upstream
+        run: |
+          git add -N .
+          git diff --binary --full-index > /tmp/xazz_issue2_final.patch
+          git diff --stat > /tmp/xazz_issue2_final.diffstat
+          git status --short > /tmp/xazz_issue2_final.status
+          sha256sum /tmp/xazz_issue2_final.patch > /tmp/xazz_issue2_final.patch.sha256
+          git worktree add --detach /tmp/xazz_issue2_applycheck "$XAZZ_BASE_SHA"
+          git -C /tmp/xazz_issue2_applycheck apply --check /tmp/xazz_issue2_final.patch
+
+      - name: Upload final validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xazz-issue2-final-delivery
+          path: |
+            /tmp/xazz-security.log
+            /tmp/health.json
+            /tmp/unsafe-report.json
+            /tmp/safe-report.json
+            /tmp/remediation.json
+            /tmp/execute-rejected.json
+            /tmp/xazz_issue2_final.patch
+            /tmp/xazz_issue2_final.patch.sha256
+            /tmp/xazz_issue2_final.diffstat
+            /tmp/xazz_issue2_final.status
+            _upstream/docs/SECURITY_GUARDRAIL.md
+            _upstream/examples/security
+            _upstream/experiments/slm_guardrail
+            _upstream/xazz-compiler/src/checker.rs
+            _upstream/xazz-server/src/security.rs
+            _upstream/xazz-server/src/bin/security_api.rs
+          if-no-files-found: warn
+          retention-days: 14

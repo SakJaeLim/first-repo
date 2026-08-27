@@ -1,0 +1,22 @@
+diff --git a/.gitignore b/.gitignore
+index 19c1612..945da4a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,3 +32,8 @@ dist/
+ audit_log/
+ checkpoints/
+ *_chart.html
++
++# Xazz Guard generated synthetic fixtures and local sLM artifacts
++examples/security/generated/
++experiments/slm_guardrail/output/
++experiments/slm_guardrail/*.gguf
+diff --git a/xazz-server/Cargo.toml b/xazz-server/Cargo.toml
+index e6b41de..272cbfe 100644
+--- a/xazz-server/Cargo.toml
++++ b/xazz-server/Cargo.toml
+@@ -15,3 +15,4 @@ encoding_rs = "0.8"
+ uuid = { version = "1", features = ["v4"] }
+ sha2 = "0.10"
+ chrono = { version = "0.4", features = ["serde"] }
++xazz-compiler = { version = "0.2.1", path = "../xazz-compiler" }

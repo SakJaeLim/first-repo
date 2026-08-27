@@ -1,0 +1,258 @@
+name: Validate Xazz Issue 2 v2
+
+on:
+  push:
+    branches:
+      - ci/xazz-issue2-v2-validation
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rust:
+    name: Rust · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout validation assets
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Reconstruct patch
+        shell: bash
+        run: |
+          cat ci/xazz_issue2_v2.patch.b64.part* \
+            | base64 -d | gzip -d > "$RUNNER_TEMP/xazz_issue2_v2.patch"
+
+      - name: Clone current upstream
+        shell: bash
+        run: git clone --depth 1 https://github.com/x1zzdev/Xazz.git _upstream
+
+      - name: Apply patch
+        shell: bash
+        working-directory: _upstream
+        run: |
+          git apply --check "$RUNNER_TEMP/xazz_issue2_v2.patch"
+          git apply "$RUNNER_TEMP/xazz_issue2_v2.patch"
+
+      - name: Validate policy, synthetic data, and sLM dataset
+        shell: bash
+        working-directory: _upstream
+        run: |
+          python examples/security/generate_patients.py
+          python experiments/slm_guardrail/validate_dataset.py
+          python -m py_compile \
+            examples/security/generate_patients.py \
+            experiments/slm_guardrail/train_qlora.py \
+            experiments/slm_guardrail/validate_dataset.py
+          python -m json.tool examples/security/healthcare_policy.json > /dev/null
+
+      - name: cargo fmt --check
+        working-directory: _upstream
+        run: cargo fmt --all -- --check
+
+      - name: Focused security tests
+        working-directory: _upstream
+        run: cargo test -p xazz-server --bin security_api
+
+      - name: Focused security clippy
+        working-directory: _upstream
+        run: cargo clippy -p xazz-server --bin security_api -- -D warnings
+
+      - name: Workspace clippy
+        working-directory: _upstream
+        run: cargo clippy --workspace --all-targets
+
+      - name: Workspace tests
+        working-directory: _upstream
+        run: cargo test --workspace
+
+  frontend:
+    name: Frontend · Visual IDE
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout validation assets
+        uses: actions/checkout@v4
+
+      - name: Reconstruct patch
+        run: |
+          cat ci/xazz_issue2_v2.patch.b64.part* \
+            | base64 -d | gzip -d > "$RUNNER_TEMP/xazz_issue2_v2.patch"
+
+      - name: Clone current upstream
+        run: git clone --depth 1 https://github.com/x1zzdev/Xazz.git _upstream
+
+      - name: Apply patch
+        working-directory: _upstream
+        run: |
+          git apply --check "$RUNNER_TEMP/xazz_issue2_v2.patch"
+          git apply "$RUNNER_TEMP/xazz_issue2_v2.patch"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: _upstream/visual-ide/package-lock.json
+
+      - name: Install dependencies
+        working-directory: _upstream/visual-ide
+        run: npm ci
+
+      - name: Build
+        working-directory: _upstream/visual-ide
+        run: npm run build
+
+      - name: Contract tests
+        working-directory: _upstream/visual-ide
+        run: npm run test:contract
+
+      - name: Contrast tests
+        working-directory: _upstream/visual-ide
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:contrast
+
+  publish:
+    name: Publish validated patch
+    needs: [rust, frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout validation assets
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Reconstruct patch
+        run: |
+          cat ci/xazz_issue2_v2.patch.b64.part* \
+            | base64 -d | gzip -d > "$RUNNER_TEMP/xazz_issue2_v2.patch"
+
+      - name: Clone current upstream and produce formatted patch
+        run: |
+          git clone --depth 1 https://github.com/x1zzdev/Xazz.git _upstream
+          cd _upstream
+          git apply --check "$RUNNER_TEMP/xazz_issue2_v2.patch"
+          git apply "$RUNNER_TEMP/xazz_issue2_v2.patch"
+          cargo fmt --all
+          mkdir -p "$RUNNER_TEMP/xazz-results"
+          git diff --binary > "$RUNNER_TEMP/xazz-results/xazz_issue2_v2_validated.patch"
+          git rev-parse HEAD > "$RUNNER_TEMP/xazz-results/upstream-base-sha.txt"
+
+      - name: Create validation report and PR body
+        env:
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          BASE_SHA="$(cat "$RUNNER_TEMP/xazz-results/upstream-base-sha.txt")"
+          cat > "$RUNNER_TEMP/xazz-results/VALIDATION_REPORT.md" <<EOF
+          # Xazz Issue #2 validation report
+
+          - Upstream repository: https://github.com/x1zzdev/Xazz
+          - Upstream base SHA: \`${BASE_SHA}\`
+          - Validation run: ${RUN_URL}
+          - Validation OS: Ubuntu, Windows, macOS
+
+          ## Passed checks
+
+          - Patch applies cleanly to current upstream main
+          - Synthetic healthcare CSV generation
+          - Policy JSON parsing
+          - sLM remediation JSONL validation and Python syntax checks
+          - cargo fmt --all -- --check
+          - cargo test -p xazz-server --bin security_api
+          - cargo clippy -p xazz-server --bin security_api -- -D warnings
+          - cargo clippy --workspace --all-targets
+          - cargo test --workspace
+          - Visual IDE npm build
+          - Visual IDE contract tests
+          - Visual IDE contrast tests
+
+          ## Scope status
+
+          Deterministic Policy-as-Code inspection, execution-before blocking, local remediation API boundary, healthcare demo assets, and QLoRA/Ollama training scaffold are implemented. Actual CUDA QLoRA training, GGUF weight publication, model-card publication, and trained-model quality evaluation are not claimed by this patch and remain follow-up work for Issue #2.
+          EOF
+
+          cat > "$RUNNER_TEMP/xazz-results/PR_BODY.md" <<'EOF'
+          ## Summary
+
+          - add a deterministic Policy-as-Code guardrail over the existing Xazz AST and lineage model
+          - block direct identifiers, unsafe row-level sensitive output, unsafe training inputs, and unsafe local file paths before execution
+          - expose local analyze/remediate/execute endpoints with exact-origin CORS, JSON body limit, and execution timeout
+          - preserve policy provenance in reports and make differential privacy semantics explicit without treating DP as anonymization
+          - add synthetic healthcare examples and a deterministic data generator
+          - add Qwen2.5-Coder/Unsloth QLoRA + Ollama training/deployment scaffold and validated multi-domain seed data
+
+          ## Safety boundary
+
+          The local model is not trusted to authorize execution. Any model-proposed remediation is rechecked by the same deterministic guardrail, and rejected plans never invoke the Xazz runner.
+
+          ## Verification
+
+          The patch was validated on Ubuntu, Windows, and macOS with Rust formatting, focused security tests, focused Clippy with warnings denied, workspace Clippy/tests, and the Visual IDE build/contract/contrast test suite.
+
+          ## Remaining Issue #2 work
+
+          Actual CUDA QLoRA training, GGUF/public weight publication, model-card publication, and trained-model quality evaluation are intentionally not claimed here.
+
+          Refs #2
+          EOF
+
+          cat > "$RUNNER_TEMP/xazz-results/APPLY_AND_PR.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          git clone https://github.com/x1zzdev/Xazz.git
+          cd Xazz
+          git switch -c feat/2-policy-guardrail-remediation
+          git apply ../xazz_issue2_v2_validated.patch
+          cargo fmt --all -- --check
+          cargo test -p xazz-server --bin security_api
+          cargo clippy -p xazz-server --bin security_api -- -D warnings
+          cargo test --workspace
+          git add .
+          git commit -m "feat(security): add Policy-as-Code guardrail and remediation API"
+          git push -u origin feat/2-policy-guardrail-remediation
+          EOF
+          chmod +x "$RUNNER_TEMP/xazz-results/APPLY_AND_PR.sh"
+
+      - name: Upload validation bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: xazz-issue2-v2-validated
+          path: ${{ runner.temp }}/xazz-results/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish readable result branch
+        run: |
+          cp -R "$RUNNER_TEMP/xazz-results" /tmp/xazz-results
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan publish-xazz-issue2-v2
+          git rm -rf .
+          git clean -fdx
+          cp -R /tmp/xazz-results/. .
+          git add .
+          git commit -m "ci: publish validated Xazz issue 2 v2 patch"
+          git push origin HEAD:ci/xazz-issue2-v2-results --force

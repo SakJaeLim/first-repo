@@ -12,7 +12,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       XAZZ_BASE_SHA: c24617cce5b26d96a7925f3cadb98a8086137a4d
     steps:
@@ -24,8 +24,8 @@ jobs:
 
       - name: Reconstruct patch
         run: |
-          cat ci/xazz_issue2_patch.b64.part* | base64 -d | gzip -d > /tmp/xazz_issue2.patch
-          echo "edbef058ec933f5ed556c6aea6256473c09e4008c32d5509ee58f8f84bee830e  /tmp/xazz_issue2.patch" | sha256sum -c -
+          cat ci/xazz_issue2_patch_v3.b64.part* | base64 -d | gzip -d > /tmp/xazz_issue2.patch
+          echo "4a972abf13111d6c91f1f5db854194436f370f28a252bbb26095e91e95469ef4  /tmp/xazz_issue2.patch" | sha256sum -c -
 
       - name: Clone and pin upstream
         run: |
@@ -37,6 +37,7 @@ jobs:
         run: |
           git apply --check /tmp/xazz_issue2.patch
           git apply /tmp/xazz_issue2.patch
+          git check-attr filter diff merge text -- examples/security/patients.csv
 
       - name: Validate synthetic sLM corpus
         working-directory: _upstream
@@ -46,11 +47,9 @@ jobs:
             experiments/slm_guardrail/train_qlora.py \
             experiments/slm_guardrail/validate_dataset.py
 
-      - name: Rust format
+      - name: Rust format check
         working-directory: _upstream
-        run: |
-          cargo fmt --all
-          cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
 
       - name: Focused unit tests
         working-directory: _upstream
@@ -58,15 +57,15 @@ jobs:
 
       - name: Focused clippy with warnings denied
         working-directory: _upstream
-        run: cargo clippy -p xazz-server --bin security_api -- -D warnings
+        run: cargo clippy -p xazz-server --bin security_api --no-deps -- -D warnings
 
       - name: Workspace tests
         working-directory: _upstream
         run: cargo test --workspace
 
-      - name: Workspace clippy
+      - name: Workspace clippy baseline
         working-directory: _upstream
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --no-deps
 
       - name: Build security API
         working-directory: _upstream

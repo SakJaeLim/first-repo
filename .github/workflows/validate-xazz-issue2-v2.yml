@@ -60,6 +60,10 @@ jobs:
             experiments/slm_guardrail/validate_dataset.py
           python -m json.tool examples/security/healthcare_policy.json > /dev/null
 
+      - name: Format source
+        working-directory: _upstream
+        run: cargo fmt --all
+
       - name: cargo fmt --check
         working-directory: _upstream
         run: cargo fmt --all -- --check

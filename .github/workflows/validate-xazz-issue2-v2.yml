@@ -54,7 +54,7 @@ jobs:
         run: cargo test -p xazz-server --bin security_api
       - name: Focused security clippy
         working-directory: _upstream
-        run: cargo clippy -p xazz-server --bin security_api -- -D warnings
+        run: cargo clippy -p xazz-server --bin security_api --no-deps -- -D warnings
       - name: Workspace clippy
         working-directory: _upstream
         run: cargo clippy --workspace --all-targets

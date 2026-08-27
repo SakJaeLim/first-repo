@@ -1,0 +1,24 @@
+diff -ruN old/xazz-server/src/bin/security_api.rs new/xazz-server/src/bin/security_api.rs
+--- old/xazz-server/src/bin/security_api.rs	2026-08-27 02:27:05.304257707 +0000
++++ new/xazz-server/src/bin/security_api.rs	2026-08-27 02:27:05.305347461 +0000
+@@ -18,7 +18,7 @@
+ use serde::{Deserialize, Serialize};
+ use tower_http::cors::{Any, CorsLayer};
+ 
+-#[allow(dead_code)]
++#[allow(dead_code, clippy::needless_borrows_for_generic_args)]
+ #[path = "../audit_log.rs"]
+ mod audit_log;
+ #[path = "../security.rs"]
+ diff -ruN old/xazz-server/src/security.rs new/xazz-server/src/security.rs
+--- old/xazz-server/src/security.rs	2026-08-27 02:27:05.307812939 +0000
++++ new/xazz-server/src/security.rs	2026-08-27 02:27:05.309014000 +0000
+@@ -1235,7 +1235,7 @@
+                 if safe_columns.is_empty() {
+                     result.push_str("    |> count\n");
+                 } else {
+-                    let selected = safe_columns.iter().cloned().collect::<Vec<_>>().join(", ");
++                    let selected = safe_columns.join(", ");
+                     result.push_str(&format!("    |> select([{selected}])\n"));
+                 }
+             }

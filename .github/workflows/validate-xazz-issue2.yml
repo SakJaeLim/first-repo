@@ -42,6 +42,29 @@ jobs:
           printf '\n# Keep the tiny synthetic security demo reviewable without Git LFS.\nexamples/security/patients.csv -filter diff merge text\n' >> .gitattributes
           git check-attr filter diff merge text -- examples/security/patients.csv
 
+      - name: Apply review fixes
+        working-directory: _upstream
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          api = Path('xazz-server/src/bin/security_api.rs')
+          text = api.read_text()
+          text = text.replace(
+              '#[allow(dead_code)]\n#[path = "../audit_log.rs"]',
+              '#[allow(dead_code, clippy::needless_borrows_for_generic_args)]\n#[path = "../audit_log.rs"]',
+          )
+          api.write_text(text)
+
+          guard = Path('xazz-server/src/security.rs')
+          text = guard.read_text()
+          text = text.replace(
+              'safe_columns.iter().cloned().collect::<Vec<_>>().join(", ")',
+              'safe_columns.join(", ")',
+          )
+          guard.write_text(text)
+          PY
+
       - name: Validate synthetic sLM corpus
         working-directory: _upstream
         run: |
